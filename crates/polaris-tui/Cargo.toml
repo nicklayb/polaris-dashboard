@@ -1,0 +1,12 @@
+[package]
+name = "polaris-tui"
+description = "Terminal renderer for Polaris dashboards"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+polaris-core.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+jiff.workspace = true

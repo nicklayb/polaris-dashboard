@@ -1,0 +1,237 @@
+# Homelab rack display: 1280x400 screen, Terminus 8x16 console font (160x25 cells).
+#
+# ┌ Docker hosts ──────┐┌PVE┐┌VMs┐┌K8s┐┌Replicas┐┌Unhealthy┐┌Containers┐
+# ├ Proxmox hosts ─────┤├ CPU (1h) ─────────┐┌ CPU temperature (6h) ─┐
+# ├ Virtual machines ──┤└───────────────────┘└───────────────────────┘
+# │                    │┌ Firing alerts ─────────────────────────────┐
+# └────────────────────┘└────────────────────────────────────────────┘
+
+[grafana]
+url = "http://monitor.nboisvert.local:3000"
+datasource_uid = "afw2akionwj5se"
+# token_file = "/run/secrets/grafana-token"  # otherwise POLARIS_GRAFANA_TOKEN or the systemd credential
+timeout = "10s"
+
+[refresh]
+interval = "15s"
+
+# Column 0 holds the tables, columns 1-6 the counters.
+# Rows: docker hosts (2) / counters, proxmox hosts (5), then guests (7)
+# spread over two rows so charts and alerts can split the right side.
+[layout]
+columns = [12, 3, 3, 3, 3, 3, 3]
+rows = [5, 8, 3, 8]
+
+[tui]
+chart_marker = "half_block"
+show_status_bar = true
+
+# --- Left: physical and virtual machines --------------------------------
+
+[[widgets]]
+type = "table"
+title = "Docker hosts"
+area = { column = 0, row = 0 }
+key_label = "host"
+key_header = "Host"
+keys = ["helios", "skynet"]
+
+[[widgets.columns]]
+header = "State"
+query = 'label_replace(up{job="hosts", group="docker"}, "host", "$1", "instance", "([^.]+)\\..*")'
+mappings = [{ value = 1, text = "UP", level = "ok" }, { value = 0, text = "DOWN", level = "critical" }]
+
+[[widgets.columns]]
+header = "Ctrs"
+query = 'label_replace(count by (instance) (container_last_seen{job="cadvisor-hosts", name!=""}), "host", "$1", "instance", "([^.]+)\\..*")'
+unit = "count"
+
+[[widgets.columns]]
+header = "CPU"
+query = 'label_replace(1 - avg by (instance) (rate(node_cpu_seconds_total{group="docker", mode="idle"}[5m])), "host", "$1", "instance", "([^.]+)\\..*")'
+unit = "ratio"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 0.75, level = "warning" }, { value = 0.9, level = "critical" }]
+
+[[widgets.columns]]
+header = "RAM"
+query = 'label_replace(1 - node_memory_MemAvailable_bytes{group="docker"} / node_memory_MemTotal_bytes{group="docker"}, "host", "$1", "instance", "([^.]+)\\..*")'
+unit = "ratio"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 0.8, level = "warning" }, { value = 0.9, level = "critical" }]
+
+[[widgets.columns]]
+header = "Temp"
+query = 'label_replace(max by (instance) (node_hwmon_temp_celsius{group="docker"} * on (instance, chip) group_left node_hwmon_chip_names{chip_name=~"coretemp|k10temp"}), "host", "$1", "instance", "([^.]+)\\..*")'
+unit = "celsius"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 75, level = "warning" }, { value = 90, level = "critical" }]
+
+[[widgets]]
+type = "table"
+title = "Proxmox hosts"
+area = { column = 0, row = 1 }
+key_label = "node"
+key_header = "Host"
+keys = ["virt", "hal", "jekyll", "socrate", "platon"]
+
+[[widgets.columns]]
+header = "State"
+query = 'label_replace(max by (id) (pve_up{id=~"node/.*"}), "node", "$1", "id", "node/(.*)")'
+mappings = [{ value = 1, text = "UP", level = "ok" }, { value = 0, text = "DOWN", level = "critical" }]
+
+[[widgets.columns]]
+header = "VMs"
+query = 'sum by (node) (max by (id, node) (pve_guest_info{template="0"}) * on (id) group_left max by (id) (pve_up))'
+unit = "count"
+
+[[widgets.columns]]
+header = "CPU"
+query = 'label_replace(max by (id) (pve_cpu_usage_ratio{id=~"node/.*"}), "node", "$1", "id", "node/(.*)")'
+unit = "ratio"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 0.75, level = "warning" }, { value = 0.9, level = "critical" }]
+
+[[widgets.columns]]
+header = "RAM"
+query = 'label_replace(max by (id) (pve_memory_usage_bytes{id=~"node/.*"}) / max by (id) (pve_memory_size_bytes{id=~"node/.*"}), "node", "$1", "id", "node/(.*)")'
+unit = "ratio"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 0.8, level = "warning" }, { value = 0.9, level = "critical" }]
+
+# node_exporter hostnames differ from Proxmox node names (virt runs on
+# "mother"), so temperatures are keyed by the kernel nodename.
+[[widgets.columns]]
+header = "Temp"
+query = 'label_replace(max by (nodename) (node_hwmon_temp_celsius{group="proxmox"} * on (instance, chip) group_left node_hwmon_chip_names{chip_name="coretemp"} * on (instance) group_left (nodename) node_uname_info{group="proxmox"}), "node", "$1", "nodename", "(.*)")'
+unit = "celsius"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 75, level = "warning" }, { value = 90, level = "critical" }]
+
+# Guest metrics are keyed by `id` (qemu/100); joining pve_guest_info turns
+# them into one row per guest name.
+[[widgets]]
+type = "table"
+title = "Virtual machines"
+area = { column = 0, row = 2, row_span = 2 }
+key_label = "name"
+key_header = "VM"
+sort_by = "Host"
+
+[[widgets.columns]]
+header = "Host"
+query = 'max by (name, node) (pve_guest_info{template="0"})'
+value_label = "node"
+
+[[widgets.columns]]
+header = "State"
+query = 'max by (name) (max by (id) (pve_up{id=~"(qemu|lxc)/.*"}) * on (id) group_left (name) max by (id, name) (pve_guest_info{template="0"}))'
+mappings = [{ value = 1, text = "UP", level = "ok" }, { value = 0, text = "DOWN", level = "critical" }]
+
+[[widgets.columns]]
+header = "CPU"
+query = 'max by (name) (max by (id) (pve_cpu_usage_ratio{id=~"(qemu|lxc)/.*"}) * on (id) group_left (name) max by (id, name) (pve_guest_info{template="0"}))'
+unit = "ratio"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 0.75, level = "warning" }, { value = 0.9, level = "critical" }]
+
+# Proxmox counts the guest page cache as used memory, so most guests sit
+# around 90%: thresholds are higher than for hosts to keep the signal.
+[[widgets.columns]]
+header = "RAM"
+query = 'max by (name) ((max by (id) (pve_memory_usage_bytes{id=~"(qemu|lxc)/.*"}) / max by (id) (pve_memory_size_bytes{id=~"(qemu|lxc)/.*"})) * on (id) group_left (name) max by (id, name) (pve_guest_info{template="0"}))'
+unit = "ratio"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 0.95, level = "warning" }, { value = 0.98, level = "critical" }]
+
+# --- Right: counters ------------------------------------------------------
+
+[[widgets]]
+type = "stat"
+title = "PVE"
+area = { column = 1, row = 0 }
+query = 'sum(max by (id) (pve_up{id=~"node/.*"}))'
+total_query = 'count(max by (id) (pve_up{id=~"node/.*"}))'
+unit = "count"
+thresholds = [{ value = 0, level = "critical" }, { value = 5, level = "ok" }]
+
+[[widgets]]
+type = "stat"
+title = "VMs"
+area = { column = 2, row = 0 }
+query = 'sum(max by (id) (pve_up{id=~"(qemu|lxc)/.*"}))'
+total_query = 'count(max by (id) (pve_up{id=~"(qemu|lxc)/.*"}))'
+unit = "count"
+
+[[widgets]]
+type = "stat"
+title = "K8s"
+area = { column = 3, row = 0 }
+query = 'count(kube_node_status_condition{condition="Ready", status="true"} == 1)'
+total_query = 'count(kube_node_info)'
+unit = "count"
+
+[[widgets]]
+type = "stat"
+title = "Replicas"
+area = { column = 4, row = 0 }
+query = 'sum(kube_deployment_status_replicas_available)'
+total_query = 'sum(kube_deployment_spec_replicas)'
+unit = "count"
+
+[[widgets]]
+type = "stat"
+title = "Unhealthy"
+area = { column = 5, row = 0 }
+query = 'sum(kube_pod_status_phase{phase=~"Pending|Failed|Unknown"})'
+unit = "count"
+thresholds = [{ value = 0, level = "ok" }, { value = 1, level = "warning" }, { value = 5, level = "critical" }]
+
+[[widgets]]
+type = "stat"
+title = "Containers"
+area = { column = 6, row = 0 }
+query = 'count(container_last_seen{job="cadvisor-hosts", name!=""})'
+unit = "count"
+
+# --- Right: trends and alerts ---------------------------------------------
+
+[[widgets]]
+type = "timeseries"
+title = "CPU (1h)"
+area = { column = 1, row = 1, column_span = 3, row_span = 2 }
+range = "1h"
+points = 60
+minimum = 0
+maximum = 1
+unit = "ratio"
+decimals = 0
+
+[[widgets.queries]]
+query = 'label_replace(max by (id) (pve_cpu_usage_ratio{id=~"node/.*"}), "node", "$1", "id", "node/(.*)")'
+legend = "{{node}}"
+
+[[widgets.queries]]
+query = 'label_replace(1 - avg by (instance) (rate(node_cpu_seconds_total{group="docker", mode="idle"}[5m])), "host", "$1", "instance", "([^.]+)\\..*")'
+legend = "{{host}}"
+
+[[widgets]]
+type = "timeseries"
+title = "CPU temperature (6h)"
+area = { column = 4, row = 1, column_span = 3, row_span = 2 }
+range = "6h"
+points = 60
+unit = "celsius"
+decimals = 0
+
+[[widgets.queries]]
+query = 'label_replace(max by (nodename) (node_hwmon_temp_celsius{group=~"proxmox|docker"} * on (instance, chip) group_left node_hwmon_chip_names{chip_name=~"coretemp|k10temp"} * on (instance) group_left (nodename) node_uname_info{group=~"proxmox|docker"}), "host", "$1", "nodename", "(.*)")'
+legend = "{{host}}"
+
+[[widgets]]
+type = "alerts"
+title = "Firing alerts"
+area = { column = 1, row = 3, column_span = 6 }
+states = ["Alerting"]
+severity_label = "severity"
+default_level = "warning"

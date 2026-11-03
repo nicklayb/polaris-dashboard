@@ -1,0 +1,173 @@
+# House services: Wi-Fi, storage and maintenance, on the rack display (160x25 cells).
+#
+# ┌Wi-Fi┐┌APs┐┌Home Assistant┐┌Containers┐┌Updates┐┌Reboots┐
+# ┌ skynet volumes ───────┐┌ Access points ─────────────────┐
+# │                       │└────────────────────────────────┘
+# │                       │┌ Wi-Fi clients ─┐┌ skynet net ──┐
+# └───────────────────────┘└────────────────┘└──────────────┘
+
+[grafana]
+url = "http://monitor.nboisvert.local:3000"
+datasource_uid = "afw2akionwj5se"
+timeout = "10s"
+
+[refresh]
+interval = "1m"
+
+# Rows sized for 3 access points and 16 volumes (plus headers and borders).
+[layout]
+columns = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+rows = [4, 8, 12]
+
+[tui]
+chart_marker = "half_block"
+show_status_bar = true
+
+# --- Counters -----------------------------------------------------------
+
+[[widgets]]
+type = "stat"
+title = "Wi-Fi clients"
+area = { column = 0, row = 0, column_span = 2 }
+query = 'sum(omada_client_connected_total)'
+unit = "count"
+
+[[widgets]]
+type = "stat"
+title = "APs online"
+area = { column = 2, row = 0, column_span = 2 }
+query = 'count(omada_device_cpu_percentage{device_type="ap", device_status="Connected"})'
+total_query = 'count(omada_device_cpu_percentage{device_type="ap"})'
+unit = "count"
+
+[[widgets]]
+type = "stat"
+title = "Home Assistant"
+area = { column = 4, row = 0, column_span = 2 }
+query = 'max(pve_up{id="qemu/100"})'
+mappings = [{ value = 1, text = "UP", level = "ok" }, { value = 0, text = "DOWN", level = "critical" }]
+
+[[widgets]]
+type = "stat"
+title = "Containers"
+area = { column = 6, row = 0, column_span = 2 }
+query = 'count(container_last_seen{job="cadvisor-hosts", name!=""})'
+unit = "count"
+
+[[widgets]]
+type = "stat"
+title = "Apt updates"
+area = { column = 8, row = 0, column_span = 2 }
+query = 'sum(apt_upgrades_pending)'
+unit = "count"
+thresholds = [{ value = 0, level = "ok" }, { value = 1, level = "warning" }]
+
+[[widgets]]
+type = "stat"
+title = "Reboots"
+area = { column = 10, row = 0, column_span = 2 }
+query = 'sum(node_reboot_required)'
+unit = "count"
+thresholds = [{ value = 0, level = "ok" }, { value = 1, level = "warning" }]
+
+# --- Storage ----------------------------------------------------------------
+# Member disks rather than pooled mounts (/media/Pool*): a pool adds up the
+# free space of its disks, which hides the ones that are full. Sorted by
+# free space, the fullest volumes stay on top when the list is cut.
+
+[[widgets]]
+type = "table"
+title = "skynet volumes"
+area = { column = 0, row = 1, column_span = 5, row_span = 2 }
+key_label = "mountpoint"
+key_header = "Volume"
+sort_by = "Free"
+
+[[widgets.columns]]
+header = "Size"
+query = 'max by (mountpoint) (node_filesystem_size_bytes{instance=~"skynet\\..*", mountpoint=~"/|/media/(Films|Serietele).*|/media/(docker|torrent)|/mnt/.*"})'
+unit = "bytes"
+decimals = 1
+
+[[widgets.columns]]
+header = "Free"
+query = 'max by (mountpoint) (node_filesystem_avail_bytes{instance=~"skynet\\..*", mountpoint=~"/|/media/(Films|Serietele).*|/media/(docker|torrent)|/mnt/.*"})'
+unit = "bytes"
+decimals = 1
+
+[[widgets.columns]]
+header = "Used"
+query = '1 - max by (mountpoint) (node_filesystem_avail_bytes{instance=~"skynet\\..*", mountpoint=~"/|/media/(Films|Serietele).*|/media/(docker|torrent)|/mnt/.*"}) / max by (mountpoint) (node_filesystem_size_bytes{instance=~"skynet\\..*", mountpoint=~"/|/media/(Films|Serietele).*|/media/(docker|torrent)|/mnt/.*"})'
+unit = "ratio"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 0.9, level = "warning" }, { value = 0.98, level = "critical" }]
+
+# --- Network ----------------------------------------------------------------
+
+[[widgets]]
+type = "table"
+title = "Access points"
+area = { column = 5, row = 1, column_span = 7 }
+key_label = "device_name"
+key_header = "AP"
+keys = ["Rez-de-chaussée", "Sous-Sol", "Extérieur"]
+
+[[widgets.columns]]
+header = "Clients"
+query = 'label_replace(count by (ap_name) (omada_client_rssi_dbm), "device_name", "$1", "ap_name", "(.*)")'
+unit = "count"
+
+[[widgets.columns]]
+header = "CPU"
+query = 'max by (device_name) (omada_device_cpu_percentage{device_type="ap"})'
+unit = "percent"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 70, level = "warning" }, { value = 90, level = "critical" }]
+
+[[widgets.columns]]
+header = "Memory"
+query = 'max by (device_name) (omada_device_mem_percentage{device_type="ap"})'
+unit = "percent"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 85, level = "warning" }, { value = 95, level = "critical" }]
+
+[[widgets.columns]]
+header = "Uptime"
+query = 'max by (device_name) (omada_device_uptime_seconds{device_type="ap"})'
+unit = "seconds"
+
+[[widgets.columns]]
+header = "Firmware"
+query = 'max by (device_name) (omada_device_need_upgrade{device_type="ap"})'
+mappings = [{ value = 0, text = "current", level = "ok" }, { value = 1, text = "UPDATE", level = "warning" }]
+
+[[widgets]]
+type = "timeseries"
+title = "Wi-Fi clients per AP (24h)"
+area = { column = 5, row = 2, column_span = 4 }
+range = "24h"
+points = 96
+minimum = 0
+unit = "count"
+
+[[widgets.queries]]
+query = 'count by (ap_name) (omada_client_rssi_dbm)'
+legend = "{{ap_name}}"
+
+[[widgets]]
+type = "timeseries"
+title = "skynet network /s (6h)"
+area = { column = 9, row = 2, column_span = 3 }
+range = "6h"
+points = 72
+minimum = 0
+unit = "bytes"
+decimals = 0
+
+[[widgets.queries]]
+query = 'sum(rate(node_network_receive_bytes_total{instance=~"skynet\\..*", device!~"lo|veth.*|docker.*|br-.*"}[5m]))'
+legend = "in"
+
+[[widgets.queries]]
+query = 'sum(rate(node_network_transmit_bytes_total{instance=~"skynet\\..*", device!~"lo|veth.*|docker.*|br-.*"}[5m]))'
+legend = "out"
