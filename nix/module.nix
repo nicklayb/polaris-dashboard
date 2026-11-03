@@ -17,9 +17,12 @@ self:
 let
   cfg = config.services.polaris-dashboard;
   settingsFormat = pkgs.formats.toml { };
+  # Interpolating copies the file into the store and keeps it in the system
+  # closure; `toString` (used by escapeShellArgs) would only give its source
+  # path, which does not exist on the target machine.
   configFile =
     if cfg.configFile != null then
-      cfg.configFile
+      "${cfg.configFile}"
     else
       settingsFormat.generate "polaris.toml" cfg.settings;
   isKmscon = cfg.console == "kmscon";
@@ -195,7 +198,11 @@ in
         # mkDefault, which other profiles use too (the aarch64 SD image sets 7).
         boot.consoleLogLevel = lib.mkOverride 900 3;
 
+        # Mask both names: the getty module makes getty.target want
+        # autovt@tty1 (an alias of getty@), and switch-to-configuration starts
+        # it, which would stop the dashboard through its Conflicts=.
         systemd.services."getty@${cfg.tty}".enable = false;
+        systemd.services."autovt@${cfg.tty}".enable = false;
 
         systemd.services.polaris-dashboard = {
           description = "Polaris console dashboard";
