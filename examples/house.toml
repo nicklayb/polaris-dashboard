@@ -20,7 +20,7 @@ columns = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 rows = [4, 8, 12]
 
 [tui]
-chart_marker = "half_block"
+chart_marker = "braille"
 show_status_bar = true
 
 # --- Counters -----------------------------------------------------------
@@ -145,6 +145,7 @@ mappings = [{ value = 0, text = "current", level = "ok" }, { value = 1, text = "
 type = "timeseries"
 title = "Wi-Fi clients per AP (24h)"
 area = { column = 5, row = 2, column_span = 4 }
+style = "sparklines"
 range = "24h"
 points = 96
 minimum = 0

@@ -243,7 +243,7 @@ mod tests {
 
     use super::*;
     use crate::data::{Alert, Sample, Series};
-    use crate::widget::{Area, TableColumn, TimeseriesQuery, ValueDisplay};
+    use crate::widget::{Area, ChartStyle, TableColumn, TimeseriesQuery, ValueDisplay};
 
     const EVALUATION_TIME: &str = "2026-11-03T12:00:00Z";
 
@@ -529,6 +529,7 @@ mod tests {
             points: 120,
             minimum: None,
             maximum: None,
+            style: ChartStyle::Lines,
             display: ValueDisplay::default(),
         }));
 

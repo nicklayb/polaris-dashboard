@@ -8,6 +8,7 @@ pub mod config;
 pub mod data;
 pub mod fetch;
 pub mod poller;
+pub mod resample;
 pub mod source;
 pub mod style;
 pub mod unit;

@@ -20,6 +20,23 @@ pub fn run(config: &Config, snapshots: &Receiver<Snapshot>) -> io::Result<()> {
     result
 }
 
+/// Shows `message` full screen until the user quits. Rendering failures are
+/// ignored: the message was already written to standard error.
+pub fn show_error(message: &str) {
+    let mut terminal = ratatui::init();
+    let _ = error_loop(&mut terminal, message);
+    ratatui::restore();
+}
+
+fn error_loop(terminal: &mut ratatui::DefaultTerminal, message: &str) -> io::Result<()> {
+    loop {
+        terminal.draw(|frame| render::draw_error(frame, message))?;
+        if event::poll(INPUT_POLL_INTERVAL)? && is_quit_event(&event::read()?) {
+            return Ok(());
+        }
+    }
+}
+
 fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     config: &Config,

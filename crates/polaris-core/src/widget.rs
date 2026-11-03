@@ -106,8 +106,22 @@ pub struct TimeseriesWidget {
     pub points: u32,
     pub minimum: Option<f64>,
     pub maximum: Option<f64>,
+    #[serde(default)]
+    pub style: ChartStyle,
     #[serde(flatten)]
     pub display: ValueDisplay,
+}
+
+/// How the series of a time series widget are laid out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChartStyle {
+    /// Every series drawn as a line on one shared chart.
+    #[default]
+    Lines,
+    /// One lane per series: its name, a sparkline and its latest value.
+    /// Easier to read than overlapping lines when there are many series.
+    Sparklines,
 }
 
 /// A range query and how to name each resulting series.

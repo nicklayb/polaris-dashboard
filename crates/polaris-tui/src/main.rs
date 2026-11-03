@@ -1,7 +1,9 @@
 //! Polaris terminal dashboard.
 //!
 //! Usage: `polaris-tui <config.toml>` to run, `polaris-tui --check
-//! <config.toml>` to only validate the configuration.
+//! <config.toml>` to only validate the configuration. With `--hold-errors`,
+//! startup errors stay on screen instead of exiting, for kiosk consoles
+//! where nobody reads standard error.
 
 mod app;
 mod palette;
@@ -15,23 +17,29 @@ use polaris_core::poller::spawn_poller;
 use polaris_core::source::{GrafanaSource, read_token};
 
 const CHECK_FLAG: &str = "--check";
-const USAGE: &str = "usage: polaris-tui [--check] <config.toml>";
+const HOLD_ERRORS_FLAG: &str = "--hold-errors";
+const USAGE: &str = "usage: polaris-tui [--check] [--hold-errors] <config.toml>";
 
 fn main() -> ExitCode {
-    match run(std::env::args().skip(1).collect()) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("polaris-tui: {message}");
-            ExitCode::FAILURE
-        }
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let Err(message) = run(&arguments) else {
+        return ExitCode::SUCCESS;
+    };
+    eprintln!("polaris-tui: {message}");
+    if arguments
+        .iter()
+        .any(|argument| argument == HOLD_ERRORS_FLAG)
+    {
+        app::show_error(&message);
     }
+    ExitCode::FAILURE
 }
 
-fn run(arguments: Vec<String>) -> Result<(), String> {
+fn run(arguments: &[String]) -> Result<(), String> {
     let check_only = arguments.iter().any(|argument| argument == CHECK_FLAG);
     let config_path = arguments
         .iter()
-        .find(|argument| *argument != CHECK_FLAG)
+        .find(|argument| !argument.starts_with("--"))
         .map(PathBuf::from)
         .ok_or(USAGE)?;
     let config = Config::load(&config_path).map_err(|error| error.to_string())?;

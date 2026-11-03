@@ -34,8 +34,8 @@
             foot
             jq
           ];
-          # Only used by scripts/run-sized.sh to preview with the console font.
-          POLARIS_FONTCONFIG = pkgs.makeFontsConf { fontDirectories = [ pkgs.terminus_font ]; };
+          # Only used by scripts/run-sized.sh to preview with the kmscon font.
+          POLARIS_FONTCONFIG = pkgs.makeFontsConf { fontDirectories = [ pkgs.cascadia-code ]; };
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };
       });

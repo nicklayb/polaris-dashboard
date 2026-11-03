@@ -20,7 +20,7 @@ columns = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 rows = [4, 8, 12]
 
 [tui]
-chart_marker = "half_block"
+chart_marker = "braille"
 show_status_bar = true
 
 # --- Counters -----------------------------------------------------------
@@ -167,6 +167,7 @@ area = { column = 7, row = 1, column_span = 5 }
 type = "timeseries"
 title = "Node CPU (3h)"
 area = { column = 7, row = 2, column_span = 5 }
+style = "sparklines"
 range = "3h"
 points = 90
 minimum = 0

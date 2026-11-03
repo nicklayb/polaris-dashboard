@@ -11,8 +11,8 @@ default:
 run config=default_config:
     cargo run --package polaris-tui -- {{config}}
 
-# Run in a fixed-size window mimicking the rack screen (font 16 = ter-v16n console font)
-run-sized size="1280x400" font_pixels="16" config=default_config:
+# Run in a fixed-size window mimicking the rack screen (font size in pixels, as kmscon font.size)
+run-sized size="1280x400" font_pixels="13" config=default_config:
     scripts/run-sized.sh {{size}} {{font_pixels}} {{config}}
 
 # Validate a configuration file without starting the dashboard

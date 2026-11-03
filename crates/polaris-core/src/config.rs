@@ -61,16 +61,17 @@ pub struct TuiConfig {
     pub show_status_bar: bool,
 }
 
-/// Glyphs used to draw chart lines. The Linux framebuffer console cannot
-/// display braille, so the default only relies on block characters.
+/// Glyphs used to draw chart lines. Braille has the finest resolution but
+/// needs a font with braille patterns (kmscon with Cascadia Mono); the Linux
+/// framebuffer console font only reliably has the full block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChartMarker {
     #[default]
+    Braille,
     HalfBlock,
     Block,
     Dot,
-    Braille,
 }
 
 /// Errors raised while loading or validating a configuration.
@@ -208,7 +209,7 @@ mod tests {
         let config = Config::parse(SPRINGFIELD_CONFIG).expect("valid configuration");
 
         assert_eq!(config.refresh.interval, DEFAULT_REFRESH_INTERVAL);
-        assert_eq!(config.tui.chart_marker, ChartMarker::HalfBlock);
+        assert_eq!(config.tui.chart_marker, ChartMarker::Braille);
         assert_eq!(config.widgets.len(), 2);
         assert!(
             matches!(&config.widgets[0].kind, WidgetKind::Stat(stat) if stat.query == "sum(homer_donuts_total)")

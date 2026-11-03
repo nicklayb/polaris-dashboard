@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Opens the dashboard in a fixed-size floating foot window, using the same
-# Terminus bitmap font as the Pi console so the character grid matches.
+# font as kmscon on the Pi (Cascadia Mono) so the character grid matches.
 #
 # Usage: run-sized.sh <WIDTHxHEIGHT> <font pixel height> <config>
 set -euo pipefail
@@ -59,7 +59,7 @@ discover_hyprland_environment
 FONTCONFIG_FILE="${POLARIS_FONTCONFIG:-${FONTCONFIG_FILE:-}}" foot \
   --app-id "$window_class" \
   --title "polaris ${size}" \
-  --font "Terminus:pixelsize=${font_pixels}" \
+  --font "Cascadia Mono:pixelsize=${font_pixels}" \
   --window-size-pixels "${size}" \
   --override pad=0x0 \
   --hold \

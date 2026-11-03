@@ -23,7 +23,7 @@ columns = [12, 3, 3, 3, 3, 3, 3]
 rows = [5, 8, 3, 8]
 
 [tui]
-chart_marker = "half_block"
+chart_marker = "braille"
 show_status_bar = true
 
 # --- Left: physical and virtual machines --------------------------------
@@ -200,6 +200,7 @@ unit = "count"
 type = "timeseries"
 title = "CPU (1h)"
 area = { column = 1, row = 1, column_span = 3, row_span = 2 }
+style = "sparklines"
 range = "1h"
 points = 60
 minimum = 0
@@ -219,6 +220,7 @@ legend = "{{host}}"
 type = "timeseries"
 title = "CPU temperature (6h)"
 area = { column = 4, row = 1, column_span = 3, row_span = 2 }
+style = "sparklines"
 range = "6h"
 points = 60
 unit = "celsius"

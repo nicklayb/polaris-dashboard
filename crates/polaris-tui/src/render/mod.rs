@@ -2,6 +2,7 @@
 
 mod alerts;
 mod grid;
+mod sparklines;
 mod stat;
 mod status_bar;
 mod table;
@@ -11,7 +12,7 @@ use polaris_core::config::Config;
 use polaris_core::data::{Snapshot, WidgetData};
 use polaris_core::source::SourceError;
 use polaris_core::style::Level;
-use polaris_core::widget::{Widget, WidgetKind};
+use polaris_core::widget::{ChartStyle, Widget, WidgetKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
@@ -23,6 +24,7 @@ use crate::palette::{self, MUTED};
 const WAITING_TEXT: &str = "Waiting for data...";
 const MISMATCH_TEXT: &str = "Data does not match the widget type";
 const STATUS_BAR_HEIGHT: u16 = 1;
+const ERROR_TITLE: &str = "polaris cannot start";
 
 /// Draws the whole dashboard; `snapshot` is `None` until the first fetch.
 pub fn draw_dashboard(frame: &mut Frame, config: &Config, snapshot: Option<&Snapshot>) {
@@ -40,6 +42,19 @@ pub fn draw_dashboard(frame: &mut Frame, config: &Config, snapshot: Option<&Snap
         let result = snapshot.and_then(|snapshot| snapshot.results.get(index));
         draw_widget(frame, cells.area_of(&widget.area), config, widget, result);
     }
+}
+
+/// Draws a startup error filling the screen, so a kiosk shows why it is empty.
+pub fn draw_error(frame: &mut Frame, message: &str) {
+    let block = widget_block(ERROR_TITLE)
+        .border_style(Style::new().fg(palette::level_color(Level::Critical)));
+    draw_message(
+        frame,
+        frame.area(),
+        block,
+        message,
+        palette::level_color(Level::Critical),
+    );
 }
 
 fn draw_widget(
@@ -69,14 +84,17 @@ fn draw_widget(
             alerts::draw(frame, area, block, entries)
         }
         (Some(Ok(WidgetData::Timeseries(series))), WidgetKind::Timeseries(timeseries)) => {
-            timeseries::draw(
-                frame,
-                area,
-                block,
-                timeseries,
-                series,
-                config.tui.chart_marker,
-            )
+            match timeseries.style {
+                ChartStyle::Lines => timeseries::draw(
+                    frame,
+                    area,
+                    block,
+                    timeseries,
+                    series,
+                    config.tui.chart_marker,
+                ),
+                ChartStyle::Sparklines => sparklines::draw(frame, area, block, timeseries, series),
+            }
         }
         (Some(Ok(_)), _) => draw_message(frame, area, block, MISMATCH_TEXT, MUTED),
     }

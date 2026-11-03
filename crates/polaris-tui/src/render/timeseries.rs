@@ -99,7 +99,7 @@ fn terminal_marker(marker: ChartMarker) -> Marker {
     }
 }
 
-fn value_bounds(widget: &TimeseriesWidget, points: &[Vec<(f64, f64)>]) -> [f64; 2] {
+pub(super) fn value_bounds(widget: &TimeseriesWidget, points: &[Vec<(f64, f64)>]) -> [f64; 2] {
     let values = || points.iter().flatten().map(|(_, value)| *value);
     let data_minimum = values().fold(f64::INFINITY, f64::min);
     let data_maximum = values().fold(f64::NEG_INFINITY, f64::max);
@@ -123,7 +123,7 @@ fn value_bounds(widget: &TimeseriesWidget, points: &[Vec<(f64, f64)>]) -> [f64; 
 
 /// Ends at the latest point and spans the configured range, so that gaps at
 /// the start of the window stay visible.
-fn time_bounds(widget: &TimeseriesWidget, points: &[Vec<(f64, f64)>]) -> [f64; 2] {
+pub(super) fn time_bounds(widget: &TimeseriesWidget, points: &[Vec<(f64, f64)>]) -> [f64; 2] {
     let end = points
         .iter()
         .flatten()
@@ -141,7 +141,7 @@ fn time_bounds(widget: &TimeseriesWidget, points: &[Vec<(f64, f64)>]) -> [f64; 2
 mod tests {
     use std::time::Duration;
 
-    use polaris_core::widget::ValueDisplay;
+    use polaris_core::widget::{ChartStyle, ValueDisplay};
 
     use super::*;
 
@@ -152,6 +152,7 @@ mod tests {
             points: 10,
             minimum,
             maximum: None,
+            style: ChartStyle::Lines,
             display: ValueDisplay::default(),
         }
     }
