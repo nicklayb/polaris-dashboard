@@ -13,6 +13,7 @@ use crate::data::{
     Alert, AlertEntry, Labels, NamedSeries, Sample, Series, Snapshot, StatData, TableCell,
     TableData, TableRow, WidgetData,
 };
+use crate::ordering::{natural_order, sort_naturally};
 use crate::source::{DataSource, Query, QueryOutput, SourceError, TimeRange};
 use crate::style::Level;
 use crate::widget::{
@@ -218,9 +219,7 @@ fn fetch_table(table: &TableWidget, source: &dyn DataSource) -> Result<TableData
             key,
         })
         .collect();
-    if table.keys.is_empty() {
-        sort_rows(&mut rows, table);
-    }
+    sort_rows(&mut rows, table);
     Ok(TableData { rows })
 }
 
@@ -252,7 +251,8 @@ fn discovered_keys(columns: &[BTreeMap<String, TableCell>]) -> Vec<String> {
         .collect()
 }
 
-/// Sorts by the `sort_by` column (missing cells last), then by key.
+/// Sorts rows alphabetically by key (see [`natural_order`]). An explicit
+/// `sort_by` column comes first (missing cells last), keys break ties.
 fn sort_rows(rows: &mut [TableRow], table: &TableWidget) {
     let sort_index = table.sort_by.as_ref().and_then(|header| {
         table
@@ -261,6 +261,7 @@ fn sort_rows(rows: &mut [TableRow], table: &TableWidget) {
             .position(|column| &column.header == header)
     });
     let Some(sort_index) = sort_index else {
+        sort_naturally(rows, |row| &row.key);
         return;
     };
     rows.sort_by(|left_row, right_row| {
@@ -268,7 +269,7 @@ fn sort_rows(rows: &mut [TableRow], table: &TableWidget) {
             left_row.values[sort_index].as_ref(),
             right_row.values[sort_index].as_ref(),
         )
-        .then_with(|| left_row.key.cmp(&right_row.key))
+        .then_with(|| natural_order(&left_row.key, &right_row.key))
     });
 }
 
@@ -278,7 +279,7 @@ fn compare_cells(left_cell: Option<&TableCell>, right_cell: Option<&TableCell>) 
             left_number.total_cmp(right_number)
         }
         (Some(TableCell::Text(left_text)), Some(TableCell::Text(right_text))) => {
-            left_text.cmp(right_text)
+            natural_order(left_text, right_text)
         }
         (Some(TableCell::Number(_)), Some(TableCell::Text(_))) => Ordering::Less,
         (Some(TableCell::Text(_)), Some(TableCell::Number(_))) => Ordering::Greater,
@@ -301,15 +302,17 @@ fn fetch_alerts(
             alert,
         })
         .collect();
-    entries.sort_by(|left_entry, right_entry| {
-        right_entry.level.cmp(&left_entry.level).then(
-            left_entry
-                .alert
-                .active_since
-                .cmp(&right_entry.alert.active_since),
-        )
-    });
+    entries
+        .sort_by(|left_entry, right_entry| compare_alerts(&left_entry.alert, &right_entry.alert));
     Ok(entries)
+}
+
+/// Orders alerts alphabetically by their displayed text, then by name and
+/// age so equal texts keep a stable order.
+fn compare_alerts(left_alert: &Alert, right_alert: &Alert) -> Ordering {
+    natural_order(left_alert.display_text(), right_alert.display_text())
+        .then_with(|| natural_order(&left_alert.name, &right_alert.name))
+        .then_with(|| left_alert.active_since.cmp(&right_alert.active_since))
 }
 
 fn alert_level(labels: &Labels, widget: &AlertsWidget) -> Level {
@@ -336,6 +339,7 @@ fn fetch_timeseries(
             });
         }
     }
+    sort_naturally(&mut named_series, |series| &series.name);
     Ok(named_series)
 }
 
@@ -720,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn alerts_are_filtered_and_sorted_by_level() {
+    fn alerts_are_filtered_and_sorted_alphabetically() {
         let alert = |name: &str, state: &str, severity: Option<&str>| Alert {
             name: name.into(),
             summary: None,
@@ -755,8 +759,8 @@ mod tests {
         assert_eq!(
             summary,
             [
-                ("Reactor meltdown", Level::Critical),
-                ("Out of Duff", Level::Warning)
+                ("Out of Duff", Level::Warning),
+                ("Reactor meltdown", Level::Critical)
             ]
         );
     }
@@ -813,6 +817,139 @@ mod tests {
         let snapshot = fetch_snapshot(&[stat], &source, now());
 
         assert_eq!(snapshot.error_count(), 1);
+    }
+
+    const SPRINGFIELD_NAMES: [&str; 5] = ["Moe", "homer10", "apu", "homer2", "Barney"];
+    const SPRINGFIELD_NAMES_SORTED: [&str; 5] = ["apu", "Barney", "homer2", "homer10", "Moe"];
+
+    fn residents_table(keys: Vec<String>) -> Widget {
+        widget(WidgetKind::Table(TableWidget {
+            key_label: "name".into(),
+            key_header: "Resident".into(),
+            keys,
+            sort_by: None,
+            columns: vec![numeric_column("Donuts", "donuts")],
+        }))
+    }
+
+    fn residents_source() -> FakeSource {
+        let samples = SPRINGFIELD_NAMES
+            .iter()
+            .map(|name| sample(&[("name", name)], 1.0))
+            .collect();
+        FakeSource {
+            samples_by_query: BTreeMap::from([("donuts".into(), samples)]),
+            ..FakeSource::default()
+        }
+    }
+
+    fn row_keys(data: WidgetData) -> Vec<String> {
+        let WidgetData::Table(table) = data else {
+            panic!("expected a table")
+        };
+        table.rows.into_iter().map(|row| row.key).collect()
+    }
+
+    #[test]
+    fn discovered_rows_are_sorted_naturally() {
+        let table = residents_table(vec![]);
+
+        let data = fetch_widget(&table, &residents_source(), now()).unwrap();
+
+        assert_eq!(row_keys(data), SPRINGFIELD_NAMES_SORTED);
+    }
+
+    #[test]
+    fn fixed_rows_are_sorted_naturally() {
+        let keys = SPRINGFIELD_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        let table = residents_table(keys);
+
+        let data = fetch_widget(&table, &residents_source(), now()).unwrap();
+
+        assert_eq!(row_keys(data), SPRINGFIELD_NAMES_SORTED);
+    }
+
+    #[test]
+    fn alerts_sort_by_displayed_text() {
+        let alert = |name: &str, summary: Option<&str>| Alert {
+            name: name.into(),
+            summary: summary.map(Into::into),
+            state: "Alerting".into(),
+            labels: Labels::default(),
+            active_since: None,
+        };
+        let source = FakeSource {
+            alerts: vec![
+                alert("Zzz", Some("Moe is out of Duff")),
+                alert("homer10", None),
+                alert("Zzz", Some("apu closed the Kwik-E-Mart")),
+                alert("homer2", None),
+                alert("Barney", None),
+            ],
+            ..FakeSource::default()
+        };
+
+        let WidgetData::Alerts(entries) = fetch_widget(&alerts_widget(), &source, now()).unwrap()
+        else {
+            panic!("expected alerts")
+        };
+
+        let texts: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.alert.display_text())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "apu closed the Kwik-E-Mart",
+                "Barney",
+                "homer2",
+                "homer10",
+                "Moe is out of Duff"
+            ]
+        );
+    }
+
+    #[test]
+    fn timeseries_series_are_sorted_by_name() {
+        let series = SPRINGFIELD_NAMES
+            .iter()
+            .map(|name| Series {
+                labels: labels(&[("name", name)]),
+                points: vec![],
+            })
+            .collect();
+        let source = FakeSource {
+            series_by_query: BTreeMap::from([("donuts".into(), series)]),
+            ..FakeSource::default()
+        };
+        let timeseries = widget(WidgetKind::Timeseries(TimeseriesWidget {
+            queries: vec![TimeseriesQuery {
+                query: "donuts".into(),
+                legend: "{{name}}".into(),
+            }],
+            range: Duration::from_secs(3600),
+            points: 60,
+            minimum: None,
+            maximum: None,
+            style: ChartStyle::Sparklines,
+            display: ValueDisplay::default(),
+        }));
+
+        let WidgetData::Timeseries(named_series) =
+            fetch_widget(&timeseries, &source, now()).unwrap()
+        else {
+            panic!("expected a time series")
+        };
+
+        let names: Vec<_> = named_series
+            .iter()
+            .map(|series| series.name.as_str())
+            .collect();
+        assert_eq!(names, SPRINGFIELD_NAMES_SORTED);
     }
 
     #[test]

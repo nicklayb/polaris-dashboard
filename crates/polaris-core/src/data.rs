@@ -91,6 +91,13 @@ pub struct Snapshot {
     pub results: Vec<Result<WidgetData, SourceError>>,
 }
 
+impl Alert {
+    /// Text identifying the alert on screen: its summary, else its name.
+    pub fn display_text(&self) -> &str {
+        self.summary.as_deref().unwrap_or(&self.name)
+    }
+}
+
 impl Snapshot {
     /// Counts widgets whose fetch failed.
     pub fn error_count(&self) -> usize {

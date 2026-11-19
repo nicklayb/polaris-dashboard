@@ -1,4 +1,4 @@
-//! List of alerts, most severe first.
+//! List of alerts, sorted alphabetically by their displayed text.
 
 use jiff::Timestamp;
 use polaris_core::data::AlertEntry;
@@ -32,11 +32,7 @@ pub fn draw(frame: &mut Frame, area: Rect, block: Block, entries: &[AlertEntry])
 
 fn alert_line(entry: &AlertEntry, now: Timestamp) -> Line<'static> {
     let color = palette::level_color(entry.level);
-    let text = entry
-        .alert
-        .summary
-        .clone()
-        .unwrap_or_else(|| entry.alert.name.clone());
+    let text = entry.alert.display_text().to_string();
     let mut spans = vec![Span::from(BULLET).fg(color), Span::from(text)];
     if let Some(active_since) = entry.alert.active_since {
         let age_seconds = now.duration_since(active_since).as_secs_f64();

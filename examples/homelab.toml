@@ -172,6 +172,26 @@ unit = "ratio"
 decimals = 0
 thresholds = [{ value = 0, level = "ok" }, { value = 0.95, level = "warning" }, { value = 0.98, level = "critical" }]
 
+# Running pods (every namespace) on VMs that are Kubernetes nodes; other
+# VMs show "-". Proxmox guest names differ from Kubernetes node names, so
+# the node is renamed after its VM below (Talos-CP0 is node "talos-cp",
+# checked against VM uptime and memory). Add a line when a node is added;
+# the join with pve_guest_info drops nodes whose VM name is unknown.
+# Kubelet accepts 110 pods per node by default.
+[[widgets.columns]]
+header = "Pods"
+query = '''
+sum by (name) (
+  label_replace(label_replace(label_replace(
+    count by (node) ((kube_pod_status_phase{phase="Running"} == 1) * on (namespace, pod) group_left (node) max by (namespace, pod, node) (kube_pod_info)),
+    "name", "Talos-Node$1", "node", "talos-node([0-9]+)"),
+    "name", "Talos-CP$1", "node", "talos-cp([0-9]+)"),
+    "name", "Talos-CP0", "node", "talos-cp")
+  * on (name) group_left max by (name) (pve_guest_info{template="0"})
+)'''
+unit = "count"
+thresholds = [{ value = 0, level = "ok" }, { value = 90, level = "warning" }, { value = 110, level = "critical" }]
+
 # --- Right: counters ------------------------------------------------------
 # First row: things that should be all up (value / total). Second row:
 # things that should stay at zero.

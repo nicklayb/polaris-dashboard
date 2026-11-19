@@ -8,6 +8,7 @@ pub mod clock;
 pub mod config;
 pub mod data;
 pub mod fetch;
+pub mod ordering;
 pub mod poller;
 pub mod refresh;
 pub mod resample;

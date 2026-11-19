@@ -66,12 +66,13 @@ pub struct TableWidget {
     pub key_label: String,
     /// Header of the key column.
     pub key_header: String,
-    /// Fixed rows, in order. Rows missing from every query are still shown,
-    /// which makes a dead node visible instead of silently disappearing.
+    /// Fixed rows. Rows missing from every query are still shown, which
+    /// makes a dead node visible instead of silently disappearing. Rows are
+    /// always displayed alphabetically by key, whatever the order here.
     #[serde(default)]
     pub keys: Vec<String>,
-    /// Header of the column rows are sorted by, then by key. Ignored when
-    /// `keys` fixes the order.
+    /// Header of the column rows are sorted by before their key. Without
+    /// it, rows are sorted alphabetically by key.
     pub sort_by: Option<String>,
     pub columns: Vec<TableColumn>,
 }
