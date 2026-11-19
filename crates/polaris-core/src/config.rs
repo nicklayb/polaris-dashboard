@@ -10,6 +10,7 @@ use crate::widget::{Area, Widget, WidgetKind};
 
 const DEFAULT_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_DNS_CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// The whole dashboard configuration, shared by every renderer.
 #[derive(Debug, Clone, Deserialize)]
@@ -36,9 +37,15 @@ pub struct GrafanaConfig {
     pub token_file: Option<PathBuf>,
     #[serde(default = "default_request_timeout", with = "humantime_serde")]
     pub timeout: Duration,
+    /// How long the address of the Grafana host is reused before resolving
+    /// it again (`dns_cache_ttl = "60s"` by default, `"0s"` disables the
+    /// cache). A failed connection always forgets the cached address.
+    #[serde(default = "default_dns_cache_ttl", with = "humantime_serde")]
+    pub dns_cache_ttl: Duration,
 }
 
-/// How often data is fetched.
+/// How often data is fetched. Widgets may refresh less often with their
+/// own `refresh` interval.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RefreshConfig {
     #[serde(with = "humantime_serde")]
@@ -174,6 +181,10 @@ fn default_request_timeout() -> Duration {
     DEFAULT_REQUEST_TIMEOUT
 }
 
+fn default_dns_cache_ttl() -> Duration {
+    DEFAULT_DNS_CACHE_TTL
+}
+
 fn default_true() -> bool {
     true
 }
@@ -209,6 +220,8 @@ mod tests {
         let config = Config::parse(SPRINGFIELD_CONFIG).expect("valid configuration");
 
         assert_eq!(config.refresh.interval, DEFAULT_REFRESH_INTERVAL);
+        assert_eq!(config.grafana.dns_cache_ttl, DEFAULT_DNS_CACHE_TTL);
+        assert_eq!(config.widgets[0].refresh, None);
         assert_eq!(config.tui.chart_marker, ChartMarker::Braille);
         assert_eq!(config.widgets.len(), 2);
         assert!(
@@ -217,6 +230,18 @@ mod tests {
         assert!(
             matches!(&config.widgets[1].kind, WidgetKind::Alerts(alerts) if alerts.states == ["Alerting"])
         );
+    }
+
+    #[test]
+    fn parses_widget_refresh_interval() {
+        let content = SPRINGFIELD_CONFIG.replace(
+            "unit = \"count\"",
+            "unit = \"count\"\n        refresh = \"1m\"",
+        );
+
+        let config = Config::parse(&content).expect("valid configuration");
+
+        assert_eq!(config.widgets[0].refresh, Some(Duration::from_secs(60)));
     }
 
     #[test]

@@ -7,12 +7,14 @@ use std::time::Duration;
 use jiff::Timestamp;
 
 use crate::data::Snapshot;
-use crate::fetch::fetch_snapshot;
+use crate::refresh::WidgetRefresher;
 use crate::source::DataSource;
 use crate::widget::Widget;
 
-/// Spawns a thread fetching every widget each `interval`.
+/// Spawns a thread producing a snapshot each `interval`.
 ///
+/// Each snapshot only refetches the widgets that are due: `interval` for
+/// widgets without their own `refresh`, the widget `refresh` otherwise.
 /// Returns the receiving end of the snapshot channel; the thread stops once
 /// the receiver is dropped.
 pub fn spawn_poller<S>(
@@ -24,18 +26,19 @@ where
     S: DataSource + Send + 'static,
 {
     let (sender, receiver) = channel();
-    let handle = thread::spawn(move || poll_forever(&widgets, &source, interval, &sender));
+    let refresher = WidgetRefresher::new(widgets, interval);
+    let handle = thread::spawn(move || poll_forever(refresher, &source, interval, &sender));
     (receiver, handle)
 }
 
 fn poll_forever(
-    widgets: &[Widget],
+    mut refresher: WidgetRefresher,
     source: &dyn DataSource,
     interval: Duration,
     sender: &Sender<Snapshot>,
 ) {
     loop {
-        let snapshot = fetch_snapshot(widgets, source, Timestamp::now());
+        let snapshot = refresher.refresh(source, Timestamp::now());
         if sender.send(snapshot).is_err() {
             return;
         }

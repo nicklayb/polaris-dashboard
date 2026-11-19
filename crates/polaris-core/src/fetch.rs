@@ -1,4 +1,8 @@
 //! Turns widget definitions into [`WidgetData`] using a [`DataSource`].
+//!
+//! A refresh first lists the queries of every widget, sends each distinct
+//! query once through [`DataSource::query_batch`] and the alerts request at
+//! most once, then builds every widget from those prefetched results.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -6,24 +10,156 @@ use std::collections::{BTreeMap, BTreeSet};
 use jiff::{SignedDuration, Timestamp};
 
 use crate::data::{
-    AlertEntry, Labels, NamedSeries, Snapshot, StatData, TableCell, TableData, TableRow, WidgetData,
+    Alert, AlertEntry, Labels, NamedSeries, Sample, Series, Snapshot, StatData, TableCell,
+    TableData, TableRow, WidgetData,
 };
-use crate::source::{DataSource, SourceError, TimeRange};
+use crate::source::{DataSource, Query, QueryOutput, SourceError, TimeRange};
 use crate::style::Level;
 use crate::widget::{
     AlertsWidget, StatWidget, TableColumn, TableWidget, TimeseriesWidget, Widget, WidgetKind,
 };
 
 const MINIMUM_STEP_SECONDS: f64 = 1.0;
+const NOT_PREFETCHED_MESSAGE: &str = "query was not prefetched";
+const MISMATCHED_OUTPUT_MESSAGE: &str = "query output does not match the query kind";
 
 /// Fetches every widget, evaluated at `now`.
 pub fn fetch_snapshot(widgets: &[Widget], source: &dyn DataSource, now: Timestamp) -> Snapshot {
+    let widget_references: Vec<&Widget> = widgets.iter().collect();
     Snapshot {
         fetched_at: now,
-        results: widgets
-            .iter()
-            .map(|widget| fetch_widget(widget, source, now))
+        results: fetch_widgets(&widget_references, source, now),
+    }
+}
+
+/// Fetches `widgets` evaluated at `now`, sending every distinct query once
+/// and requesting alerts at most once. Results are ordered like `widgets`;
+/// a failing query only fails the widgets using it.
+pub fn fetch_widgets(
+    widgets: &[&Widget],
+    source: &dyn DataSource,
+    now: Timestamp,
+) -> Vec<Result<WidgetData, SourceError>> {
+    let prefetched = PrefetchedSource::load(widgets, source, now);
+    widgets
+        .iter()
+        .map(|widget| fetch_widget(widget, &prefetched, now))
+        .collect()
+}
+
+/// Lists the PromQL queries `widget` needs when evaluated at `now`.
+///
+/// A time series widget whose range cannot be computed has no query; its
+/// fetch reports the problem.
+pub fn widget_queries(widget: &Widget, now: Timestamp) -> Vec<Query> {
+    match &widget.kind {
+        WidgetKind::Stat(stat) => std::iter::once(&stat.query)
+            .chain(&stat.total_query)
+            .map(|expression| instant(expression))
             .collect(),
+        WidgetKind::Table(table) => table
+            .columns
+            .iter()
+            .map(|column| instant(&column.query))
+            .collect(),
+        WidgetKind::Alerts(_) => Vec::new(),
+        WidgetKind::Timeseries(timeseries) => timeseries_queries(timeseries, now),
+    }
+}
+
+/// Collects the queries of every widget, each distinct query once, in
+/// first-seen order.
+pub fn distinct_queries(widgets: &[&Widget], now: Timestamp) -> Vec<Query> {
+    let mut queries: Vec<Query> = Vec::new();
+    for query in widgets
+        .iter()
+        .flat_map(|widget| widget_queries(widget, now))
+    {
+        if !queries.contains(&query) {
+            queries.push(query);
+        }
+    }
+    queries
+}
+
+fn instant(expression: &str) -> Query {
+    Query::Instant {
+        expression: expression.to_string(),
+    }
+}
+
+fn timeseries_queries(widget: &TimeseriesWidget, now: Timestamp) -> Vec<Query> {
+    let Ok(range) = time_range(widget, now) else {
+        return Vec::new();
+    };
+    widget
+        .queries
+        .iter()
+        .map(|query| Query::Range {
+            expression: query.query.clone(),
+            range,
+        })
+        .collect()
+}
+
+/// Answers widget fetches from the results of one batched round trip.
+struct PrefetchedSource {
+    queries: Vec<Query>,
+    outputs: Vec<Result<QueryOutput, SourceError>>,
+    alerts: Option<Result<Vec<Alert>, SourceError>>,
+}
+
+impl PrefetchedSource {
+    fn load(widgets: &[&Widget], source: &dyn DataSource, now: Timestamp) -> Self {
+        let queries = distinct_queries(widgets, now);
+        let outputs = if queries.is_empty() {
+            Vec::new()
+        } else {
+            source.query_batch(&queries)
+        };
+        let has_alerts_widget = widgets
+            .iter()
+            .any(|widget| matches!(widget.kind, WidgetKind::Alerts(_)));
+        Self {
+            queries,
+            outputs,
+            alerts: has_alerts_widget.then(|| source.alerts()),
+        }
+    }
+
+    fn output(&self, query: &Query) -> Result<QueryOutput, SourceError> {
+        self.queries
+            .iter()
+            .position(|known_query| known_query == query)
+            .and_then(|index| self.outputs.get(index))
+            .cloned()
+            .unwrap_or_else(|| Err(SourceError::Request(NOT_PREFETCHED_MESSAGE.into())))
+    }
+}
+
+impl DataSource for PrefetchedSource {
+    fn instant_query(&self, query: &str) -> Result<Vec<Sample>, SourceError> {
+        match self.output(&instant(query))? {
+            QueryOutput::Samples(samples) => Ok(samples),
+            QueryOutput::Series(_) => Err(SourceError::Response(MISMATCHED_OUTPUT_MESSAGE.into())),
+        }
+    }
+
+    fn range_query(&self, query: &str, range: TimeRange) -> Result<Vec<Series>, SourceError> {
+        let query = Query::Range {
+            expression: query.to_string(),
+            range,
+        };
+        match self.output(&query)? {
+            QueryOutput::Series(series) => Ok(series),
+            QueryOutput::Samples(_) => Err(SourceError::Response(MISMATCHED_OUTPUT_MESSAGE.into())),
+        }
+    }
+
+    fn alerts(&self) -> Result<Vec<Alert>, SourceError> {
+        self.alerts
+            .clone()
+            .unwrap_or_else(|| Err(SourceError::Request(NOT_PREFETCHED_MESSAGE.into())))
     }
 }
 
@@ -242,7 +378,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::data::{Alert, Sample, Series};
     use crate::widget::{Area, ChartStyle, TableColumn, TimeseriesQuery, ValueDisplay};
 
     const EVALUATION_TIME: &str = "2026-11-03T12:00:00Z";
@@ -254,6 +389,8 @@ mod tests {
         series_by_query: BTreeMap<String, Vec<Series>>,
         alerts: Vec<Alert>,
         requested_ranges: RefCell<Vec<TimeRange>>,
+        batch_sizes: RefCell<Vec<usize>>,
+        alerts_calls: RefCell<usize>,
     }
 
     impl DataSource for FakeSource {
@@ -270,7 +407,23 @@ mod tests {
         }
 
         fn alerts(&self) -> Result<Vec<Alert>, SourceError> {
+            *self.alerts_calls.borrow_mut() += 1;
             Ok(self.alerts.clone())
+        }
+
+        fn query_batch(&self, queries: &[Query]) -> Vec<Result<QueryOutput, SourceError>> {
+            self.batch_sizes.borrow_mut().push(queries.len());
+            queries
+                .iter()
+                .map(|query| match query {
+                    Query::Instant { expression } => {
+                        self.instant_query(expression).map(QueryOutput::Samples)
+                    }
+                    Query::Range { expression, range } => self
+                        .range_query(expression, *range)
+                        .map(QueryOutput::Series),
+                })
+                .collect()
         }
     }
 
@@ -297,6 +450,7 @@ mod tests {
                 column_span: 1,
                 row_span: 1,
             },
+            refresh: None,
             kind,
         }
     }
@@ -312,6 +466,105 @@ mod tests {
 
     fn now() -> Timestamp {
         EVALUATION_TIME.parse().unwrap()
+    }
+
+    fn stat_widget(query: &str, total_query: Option<&str>) -> Widget {
+        widget(WidgetKind::Stat(StatWidget {
+            query: query.into(),
+            total_query: total_query.map(Into::into),
+            display: ValueDisplay::default(),
+        }))
+    }
+
+    fn alerts_widget() -> Widget {
+        widget(WidgetKind::Alerts(AlertsWidget {
+            states: vec!["Alerting".into()],
+            severity_label: "severity".into(),
+            default_level: Level::Warning,
+        }))
+    }
+
+    fn duff_source() -> FakeSource {
+        FakeSource {
+            samples_by_query: BTreeMap::from([
+                ("duff".into(), vec![sample(&[], 6.0)]),
+                ("kegs".into(), vec![sample(&[], 12.0)]),
+            ]),
+            ..FakeSource::default()
+        }
+    }
+
+    #[test]
+    fn identical_queries_are_sent_once_in_one_batch() {
+        let source = duff_source();
+        let moe = stat_widget("duff", Some("kegs"));
+        let barney = stat_widget("duff", None);
+
+        let results = fetch_widgets(
+            &[&moe, &barney, &alerts_widget(), &alerts_widget()],
+            &source,
+            now(),
+        );
+
+        assert_eq!(*source.batch_sizes.borrow(), [2]);
+        assert_eq!(*source.alerts_calls.borrow(), 1);
+        assert_eq!(
+            results[1],
+            Ok(WidgetData::Stat(StatData {
+                value: Some(6.0),
+                total: None
+            }))
+        );
+    }
+
+    #[test]
+    fn failing_query_only_fails_its_widgets() {
+        let source = duff_source();
+        let moe = stat_widget("duff", None);
+        let homer = stat_widget("missing", None);
+
+        let results = fetch_widgets(&[&moe, &homer], &source, now());
+
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
+    }
+
+    #[test]
+    fn alerts_only_refresh_sends_no_query_batch() {
+        let source = FakeSource::default();
+
+        fetch_widgets(&[&alerts_widget()], &source, now());
+
+        assert!(source.batch_sizes.borrow().is_empty());
+    }
+
+    #[test]
+    fn distinct_queries_keep_instant_and_range_apart() {
+        let table = widget(WidgetKind::Table(TableWidget {
+            key_label: "node".into(),
+            key_header: "Node".into(),
+            keys: vec![],
+            sort_by: None,
+            columns: vec![numeric_column("CPU", "cpu"), numeric_column("Again", "cpu")],
+        }));
+        let chart = widget(WidgetKind::Timeseries(TimeseriesWidget {
+            queries: vec![TimeseriesQuery {
+                query: "cpu".into(),
+                legend: String::new(),
+            }],
+            range: Duration::from_secs(3600),
+            points: 60,
+            minimum: None,
+            maximum: None,
+            style: ChartStyle::Lines,
+            display: ValueDisplay::default(),
+        }));
+
+        let queries = distinct_queries(&[&table, &chart, &chart], now());
+
+        assert_eq!(queries.len(), 2);
+        assert_eq!(queries[0], instant("cpu"));
+        assert!(matches!(&queries[1], Query::Range { range, .. } if range.step_seconds == 60.0));
     }
 
     #[test]

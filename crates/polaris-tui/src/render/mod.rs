@@ -1,6 +1,7 @@
 //! Draws a configuration and its latest snapshot into a frame.
 
 mod alerts;
+mod big_text;
 mod grid;
 mod sparklines;
 mod stat;

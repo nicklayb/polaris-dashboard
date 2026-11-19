@@ -1,5 +1,6 @@
-//! Grafana backed data source: PromQL through the datasource proxy and
-//! Grafana-managed alerts through the Prometheus compatible alerting API.
+//! Grafana backed data source: PromQL through the batched
+//! `POST /api/ds/query` endpoint and Grafana-managed alerts through the
+//! Prometheus compatible alerting API.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -8,9 +9,14 @@ use jiff::Timestamp;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use ureq::Agent;
+use ureq::http::{Response, Uri};
 use ureq::tls::{RootCerts, TlsConfig};
+use ureq::unversioned::transport::DefaultConnector;
 
-use super::{DataSource, SourceError, TimeRange};
+use super::data_frame::QueryDataResponse;
+use super::dns::{CachingResolver, is_connection_failure};
+use super::query_batch::{QueryRequest, group_by_window};
+use super::{DataSource, Query, QueryOutput, SourceError, TimeRange};
 use crate::config::GrafanaConfig;
 use crate::data::{Alert, Sample, Series};
 
@@ -18,13 +24,17 @@ const TOKEN_ENVIRONMENT_VARIABLE: &str = "POLARIS_GRAFANA_TOKEN";
 const CREDENTIALS_DIRECTORY_VARIABLE: &str = "CREDENTIALS_DIRECTORY";
 const TOKEN_CREDENTIAL_NAME: &str = "grafana-token";
 const ALERTS_PATH: &str = "/api/prometheus/grafana/api/v1/alerts";
+const QUERY_PATH: &str = "/api/ds/query";
 const ALERT_NAME_LABEL: &str = "alertname";
 const ALERT_SUMMARY_ANNOTATION: &str = "summary";
 const MAXIMUM_ERROR_BODY_CHARACTERS: usize = 120;
+const UNSENT_QUERY_MESSAGE: &str = "query was not sent";
+const MISMATCHED_OUTPUT_MESSAGE: &str = "query output does not match the query kind";
 
 /// Talks to a Grafana instance with a service account token.
 pub struct GrafanaSource {
     agent: Agent,
+    resolver: CachingResolver,
     base_url: String,
     datasource_uid: String,
     authorization: String,
@@ -32,48 +42,38 @@ pub struct GrafanaSource {
 
 impl GrafanaSource {
     /// Builds a source for `config`, authenticating with `token`.
+    ///
+    /// Host name answers are cached for `config.dns_cache_ttl` and dropped
+    /// as soon as a request fails at the connection level.
     pub fn new(config: &GrafanaConfig, token: &str) -> Self {
         // The platform verifier trusts the system CA store, which holds
         // private homelab CAs that bundled web roots do not.
         let tls_config = TlsConfig::builder()
             .root_certs(RootCerts::PlatformVerifier)
             .build();
-        let agent = Agent::config_builder()
+        let agent_config = Agent::config_builder()
             .timeout_global(Some(config.timeout))
             .tls_config(tls_config)
             .http_status_as_error(false)
-            .build()
-            .into();
+            .build();
+        let resolver = CachingResolver::with_system_resolver(config.dns_cache_ttl);
+        let agent = Agent::with_parts(agent_config, DefaultConnector::default(), resolver.clone());
         Self {
             agent,
+            resolver,
             base_url: config.url.trim_end_matches('/').to_string(),
             datasource_uid: config.datasource_uid.clone(),
             authorization: format!("Bearer {}", token.trim()),
         }
     }
 
-    fn prometheus_url(&self, endpoint: &str) -> String {
-        format!(
-            "{}/api/datasources/proxy/uid/{}/api/v1/{endpoint}",
-            self.base_url, self.datasource_uid
-        )
-    }
-
-    fn get_json<T: DeserializeOwned>(
-        &self,
-        url: &str,
-        parameters: &[(&str, String)],
-    ) -> Result<T, SourceError> {
-        let mut request = self
+    fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T, SourceError> {
+        let response = self
             .agent
             .get(url)
-            .header("Authorization", &self.authorization);
-        for (name, value) in parameters {
-            request = request.query(*name, value);
-        }
-        let mut response = request
-            .call()
-            .map_err(|error| SourceError::Request(error.to_string()))?;
+            .header("Authorization", &self.authorization)
+            .call();
+        let mut response = self.connected(url, response)?;
         let status = response.status();
         if !status.is_success() {
             let body = response.body_mut().read_to_string().unwrap_or_default();
@@ -87,46 +87,96 @@ impl GrafanaSource {
             .read_json()
             .map_err(|error| SourceError::Response(error.to_string()))
     }
+
+    fn post_query(&self, request: &QueryRequest) -> Result<QueryDataResponse, SourceError> {
+        let url = format!("{}{QUERY_PATH}", self.base_url);
+        let response = self
+            .agent
+            .post(&url)
+            .header("Authorization", &self.authorization)
+            .send_json(request);
+        let mut response = self.connected(&url, response)?;
+        let status = response.status().as_u16();
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|error| SourceError::Response(error.to_string()))?;
+        parse_query_response(status, &body)
+    }
+
+    /// Turns a transport failure into an error, forgetting the cached
+    /// address of the host so the next request resolves it again.
+    fn connected(
+        &self,
+        url: &str,
+        response: Result<Response<ureq::Body>, ureq::Error>,
+    ) -> Result<Response<ureq::Body>, SourceError> {
+        response.map_err(|error| {
+            if is_connection_failure(&error) {
+                self.forget_address(url);
+            }
+            SourceError::Request(error.to_string())
+        })
+    }
+
+    fn forget_address(&self, url: &str) {
+        if let Ok(uri) = url.parse::<Uri>() {
+            self.resolver.invalidate(&uri);
+        }
+    }
+
+    fn single_query(&self, query: Query) -> Result<QueryOutput, SourceError> {
+        self.query_batch(&[query])
+            .pop()
+            .unwrap_or_else(|| Err(SourceError::Request(UNSENT_QUERY_MESSAGE.into())))
+    }
 }
 
 impl DataSource for GrafanaSource {
     fn instant_query(&self, query: &str) -> Result<Vec<Sample>, SourceError> {
-        let response: PrometheusResponse<VectorResult> = self.get_json(
-            &self.prometheus_url("query"),
-            &[("query", query.to_string())],
-        )?;
-        response
-            .into_data()?
-            .into_iter()
-            .map(VectorResult::into_sample)
-            .collect()
+        let output = self.single_query(Query::Instant {
+            expression: query.to_string(),
+        })?;
+        match output {
+            QueryOutput::Samples(samples) => Ok(samples),
+            QueryOutput::Series(_) => Err(SourceError::Response(MISMATCHED_OUTPUT_MESSAGE.into())),
+        }
     }
 
     fn range_query(&self, query: &str, range: TimeRange) -> Result<Vec<Series>, SourceError> {
-        let parameters = [
-            ("query", query.to_string()),
-            ("start", range.start.as_second().to_string()),
-            ("end", range.end.as_second().to_string()),
-            ("step", range.step_seconds.to_string()),
-        ];
-        let response: PrometheusResponse<MatrixResult> =
-            self.get_json(&self.prometheus_url("query_range"), &parameters)?;
-        response
-            .into_data()?
-            .into_iter()
-            .map(MatrixResult::into_series)
-            .collect()
+        let output = self.single_query(Query::Range {
+            expression: query.to_string(),
+            range,
+        })?;
+        match output {
+            QueryOutput::Series(series) => Ok(series),
+            QueryOutput::Samples(_) => Err(SourceError::Response(MISMATCHED_OUTPUT_MESSAGE.into())),
+        }
     }
 
     fn alerts(&self) -> Result<Vec<Alert>, SourceError> {
-        let response: AlertsResponse =
-            self.get_json(&format!("{}{ALERTS_PATH}", self.base_url), &[])?;
+        let response: AlertsResponse = self.get_json(&format!("{}{ALERTS_PATH}", self.base_url))?;
         Ok(response
             .data
             .alerts
             .into_iter()
             .map(GrafanaAlert::into_alert)
             .collect())
+    }
+
+    /// Sends one request per time window (see [`group_by_window`]).
+    fn query_batch(&self, queries: &[Query]) -> Vec<Result<QueryOutput, SourceError>> {
+        let mut outputs: Vec<Result<QueryOutput, SourceError>> = queries
+            .iter()
+            .map(|_| Err(SourceError::Request(UNSENT_QUERY_MESSAGE.into())))
+            .collect();
+        for group in group_by_window(queries) {
+            let response = self.post_query(&group.request(&self.datasource_uid));
+            for (batch_index, output) in group.outputs(response) {
+                outputs[batch_index] = output;
+            }
+        }
+        outputs
     }
 }
 
@@ -157,30 +207,6 @@ fn read_token_file(path: &Path) -> Result<String, SourceError> {
 }
 
 #[derive(Deserialize)]
-struct PrometheusResponse<T> {
-    status: String,
-    error: Option<String>,
-    data: Option<PrometheusData<T>>,
-}
-
-#[derive(Deserialize)]
-struct PrometheusData<T> {
-    result: Vec<T>,
-}
-
-#[derive(Debug, Deserialize)]
-struct VectorResult {
-    metric: BTreeMap<String, String>,
-    value: (f64, String),
-}
-
-#[derive(Deserialize)]
-struct MatrixResult {
-    metric: BTreeMap<String, String>,
-    values: Vec<(f64, String)>,
-}
-
-#[derive(Deserialize)]
 struct GrafanaErrorBody {
     message: String,
 }
@@ -205,38 +231,6 @@ struct GrafanaAlert {
     active_at: Option<String>,
 }
 
-impl<T> PrometheusResponse<T> {
-    fn into_data(self) -> Result<Vec<T>, SourceError> {
-        match self.data {
-            Some(data) if self.status == "success" => Ok(data.result),
-            _ => Err(SourceError::Response(self.error.unwrap_or(self.status))),
-        }
-    }
-}
-
-impl VectorResult {
-    fn into_sample(self) -> Result<Sample, SourceError> {
-        Ok(Sample {
-            labels: self.metric,
-            value: parse_sample_value(&self.value.1)?,
-        })
-    }
-}
-
-impl MatrixResult {
-    fn into_series(self) -> Result<Series, SourceError> {
-        let points = self
-            .values
-            .iter()
-            .map(|(time, value)| Ok((*time, parse_sample_value(value)?)))
-            .collect::<Result<_, SourceError>>()?;
-        Ok(Series {
-            labels: self.metric,
-            points,
-        })
-    }
-}
-
 impl GrafanaAlert {
     fn into_alert(self) -> Alert {
         Alert {
@@ -252,6 +246,18 @@ impl GrafanaAlert {
                 .and_then(|active_at| active_at.parse::<Timestamp>().ok()),
             labels: self.labels,
         }
+    }
+}
+
+/// Reads a `/api/ds/query` body. Grafana answers HTTP 400 when any query
+/// of the batch fails but still reports every query in `results`, so such
+/// a body is kept and only the failing queries become errors.
+fn parse_query_response(status: u16, body: &str) -> Result<QueryDataResponse, SourceError> {
+    let is_success = (200..300).contains(&status);
+    match serde_json::from_str::<QueryDataResponse>(body) {
+        Ok(response) if is_success || !response.results.is_empty() => Ok(response),
+        Err(error) if is_success => Err(SourceError::Response(error.to_string())),
+        _ => Err(SourceError::Request(describe_http_failure(status, body))),
     }
 }
 
@@ -273,62 +279,26 @@ fn describe_http_failure(status: u16, body: &str) -> String {
     }
 }
 
-fn parse_sample_value(value: &str) -> Result<f64, SourceError> {
-    value
-        .parse()
-        .map_err(|_| SourceError::Response(format!("invalid sample value \"{value}\"")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parses_vector_response() {
-        let body = r#"{"status":"success","data":{"resultType":"vector","result":[
-            {"metric":{"node":"evergreen-terrace"},"value":[1793722065.9,"0.742"]}]}}"#;
+    fn query_response_keeps_per_query_errors_of_a_failed_batch() {
+        let body = r#"{"results":{"Q0":{"status":400,"error":"parse error: D'oh!"}}}"#;
 
-        let response: PrometheusResponse<VectorResult> = serde_json::from_str(body).unwrap();
-        let samples: Vec<Sample> = response
-            .into_data()
-            .unwrap()
-            .into_iter()
-            .map(|result| result.into_sample().unwrap())
-            .collect();
+        let response = parse_query_response(400, body).unwrap();
 
-        assert_eq!(samples.len(), 1);
-        assert_eq!(samples[0].labels["node"], "evergreen-terrace");
-        assert_eq!(samples[0].value, 0.742);
+        assert_eq!(response.results.len(), 1);
     }
 
     #[test]
-    fn parses_matrix_response_with_special_values() {
-        let body = r#"{"status":"success","data":{"resultType":"matrix","result":[
-            {"metric":{},"values":[[1.0,"1"],[2.0,"NaN"],[3.0,"+Inf"]]}]}}"#;
-
-        let response: PrometheusResponse<MatrixResult> = serde_json::from_str(body).unwrap();
-        let series = response
-            .into_data()
-            .unwrap()
-            .pop()
-            .unwrap()
-            .into_series()
-            .unwrap();
-
-        assert_eq!(series.points[0], (1.0, 1.0));
-        assert!(series.points[1].1.is_nan());
-        assert!(series.points[2].1.is_infinite());
-    }
-
-    #[test]
-    fn reports_prometheus_errors() {
-        let body = r#"{"status":"error","errorType":"bad_data","error":"parse error: D'oh!"}"#;
-
-        let response: PrometheusResponse<VectorResult> = serde_json::from_str(body).unwrap();
+    fn query_response_without_results_is_a_request_failure() {
+        let body = r#"{"message":"Invalid API key"}"#;
 
         assert_eq!(
-            response.into_data().unwrap_err(),
-            SourceError::Response("parse error: D'oh!".into())
+            parse_query_response(401, body).unwrap_err(),
+            SourceError::Request("HTTP 401: Invalid API key".into())
         );
     }
 

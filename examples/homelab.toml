@@ -1,10 +1,11 @@
 # Homelab rack display: 1280x400 screen, Terminus 8x16 console font (160x25 cells).
 #
-# ┌ Docker hosts ──────┐┌PVE┐┌VMs┐┌K8s┐┌Replicas┐┌Unhealthy┐┌Containers┐
-# ├ Proxmox hosts ─────┤├ CPU (1h) ─────────┐┌ CPU temperature (6h) ─┐
-# ├ Virtual machines ──┤└───────────────────┘└───────────────────────┘
-# │                    │┌ Firing alerts ─────────────────────────────┐
-# └────────────────────┘└────────────────────────────────────────────┘
+# ┌ Docker hosts ──────┐┌PVE──┐┌K8s─┐┌VMs─────┐┌App pods─┐┌Targets down┐
+# ├ Proxmox hosts ─────┤├Ctrs─┤├OOM─┤├Restarts┤├Unhealthy┤├Failed units┤
+# │                    │├ Firing alerts ───────────────────────────────┤
+# ├ Virtual machines ──┤│                                              │
+# │                    ││                                              │
+# └────────────────────┘└──────────────────────────────────────────────┘
 
 [grafana]
 url = "http://monitor.nboisvert.local:3000"
@@ -15,12 +16,16 @@ timeout = "10s"
 [refresh]
 interval = "15s"
 
-# Column 0 holds the tables, columns 1-6 the counters.
-# Rows: docker hosts (2) / counters, proxmox hosts (5), then guests (7)
-# spread over two rows so charts and alerts can split the right side.
+# Weights are screen cells (160 columns, 24 rows above the status bar).
+# Column 0 holds the tables, columns 1-5 the counters. Big digits need
+# 4 cells per character minus one (`22/22` = 19) inside the borders, so
+# counters with a total sit in the wider columns 3-5.
+# Rows: docker hosts (2) and the first counter row, proxmox hosts (5) over
+# the second counter row and the top of the alerts, then guests beside the
+# rest of the alerts.
 [layout]
-columns = [12, 3, 3, 3, 3, 3, 3]
-rows = [5, 8, 3, 8]
+columns = [64, 15, 14, 21, 23, 23]
+rows = [5, 5, 3, 6, 5]
 
 [tui]
 chart_marker = "braille"
@@ -67,10 +72,18 @@ unit = "celsius"
 decimals = 0
 thresholds = [{ value = 0, level = "ok" }, { value = 75, level = "warning" }, { value = 90, level = "critical" }]
 
+# Uptime turns yellow for the first hour after a boot.
+[[widgets.columns]]
+header = "Up"
+query = 'label_replace(time() - node_boot_time_seconds{group="docker"}, "host", "$1", "instance", "([^.]+)\\..*")'
+unit = "seconds"
+decimals = 0
+thresholds = [{ value = 0, level = "warning" }, { value = 3600, level = "ok" }]
+
 [[widgets]]
 type = "table"
 title = "Proxmox hosts"
-area = { column = 0, row = 1 }
+area = { column = 0, row = 1, row_span = 2 }
 key_label = "node"
 key_header = "Host"
 keys = ["virt", "hal", "jekyll", "socrate", "platon"]
@@ -108,12 +121,27 @@ unit = "celsius"
 decimals = 0
 thresholds = [{ value = 0, level = "ok" }, { value = 75, level = "warning" }, { value = 90, level = "critical" }]
 
+# Fullest Proxmox storage of the node (storage/<node>/<name>).
+[[widgets.columns]]
+header = "Disk"
+query = 'max by (node) (label_replace(max by (id) (pve_disk_usage_bytes{id=~"storage/.*"}) / max by (id) (pve_disk_size_bytes{id=~"storage/.*"}), "node", "$1", "id", "storage/([^/]+)/.*"))'
+unit = "ratio"
+decimals = 0
+thresholds = [{ value = 0, level = "ok" }, { value = 0.8, level = "warning" }, { value = 0.9, level = "critical" }]
+
+[[widgets.columns]]
+header = "Up"
+query = 'label_replace(max by (id) (pve_uptime_seconds{id=~"node/.*"}), "node", "$1", "id", "node/(.*)")'
+unit = "seconds"
+decimals = 0
+thresholds = [{ value = 0, level = "warning" }, { value = 3600, level = "ok" }]
+
 # Guest metrics are keyed by `id` (qemu/100); joining pve_guest_info turns
 # them into one row per guest name.
 [[widgets]]
 type = "table"
 title = "Virtual machines"
-area = { column = 0, row = 2, row_span = 2 }
+area = { column = 0, row = 3, row_span = 2 }
 key_label = "name"
 key_header = "VM"
 sort_by = "Host"
@@ -145,6 +173,8 @@ decimals = 0
 thresholds = [{ value = 0, level = "ok" }, { value = 0.95, level = "warning" }, { value = 0.98, level = "critical" }]
 
 # --- Right: counters ------------------------------------------------------
+# First row: things that should be all up (value / total). Second row:
+# things that should stay at zero.
 
 [[widgets]]
 type = "stat"
@@ -157,83 +187,120 @@ thresholds = [{ value = 0, level = "critical" }, { value = 5, level = "ok" }]
 
 [[widgets]]
 type = "stat"
-title = "VMs"
-area = { column = 2, row = 0 }
-query = 'sum(max by (id) (pve_up{id=~"(qemu|lxc)/.*"}))'
-total_query = 'count(max by (id) (pve_up{id=~"(qemu|lxc)/.*"}))'
-unit = "count"
-
-[[widgets]]
-type = "stat"
 title = "K8s"
-area = { column = 3, row = 0 }
+area = { column = 2, row = 0 }
 query = 'count(kube_node_status_condition{condition="Ready", status="true"} == 1)'
 total_query = 'count(kube_node_info)'
 unit = "count"
 
 [[widgets]]
 type = "stat"
-title = "Replicas"
+title = "VMs"
+area = { column = 3, row = 0 }
+query = 'sum(max by (id) (pve_up{id=~"(qemu|lxc)/.*"}))'
+total_query = 'count(max by (id) (pve_up{id=~"(qemu|lxc)/.*"}))'
+unit = "count"
+
+# Application pods: live pods owned by a Deployment (Pod -> ReplicaSet ->
+# Deployment), outside cluster infrastructure namespaces. DaemonSet, static
+# and Job pods are ignored, as are terminated pods (Succeeded, Failed) that
+# linger after a node restart. Ready + unhealthy always equals the total.
+# To change the excluded namespaces, edit the `namespace!~` line of the three
+# queries below; they must stay identical.
+
+[[widgets]]
+type = "stat"
+title = "App pods"
 area = { column = 4, row = 0 }
-query = 'sum(kube_deployment_status_replicas_available)'
-total_query = 'sum(kube_deployment_spec_replicas)'
+query = '''
+sum(
+  max by (namespace, pod) (
+    (kube_pod_status_phase{phase=~"Pending|Running|Unknown",
+      namespace!~"kube-system|longhorn-system|metallb-system|traefik|argocd|monitor"} == 1)
+    * on (namespace, pod) group_left (replicaset) label_replace(kube_pod_owner{owner_kind="ReplicaSet"}, "replicaset", "$1", "owner_name", "(.*)")
+    * on (namespace, replicaset) group_left max by (namespace, replicaset) (kube_replicaset_owner{owner_kind="Deployment"})
+  )
+  * on (namespace, pod) max by (namespace, pod) (kube_pod_status_ready{condition="true"})
+)'''
+total_query = '''
+count(
+  max by (namespace, pod) (
+    (kube_pod_status_phase{phase=~"Pending|Running|Unknown",
+      namespace!~"kube-system|longhorn-system|metallb-system|traefik|argocd|monitor"} == 1)
+    * on (namespace, pod) group_left (replicaset) label_replace(kube_pod_owner{owner_kind="ReplicaSet"}, "replicaset", "$1", "owner_name", "(.*)")
+    * on (namespace, replicaset) group_left max by (namespace, replicaset) (kube_replicaset_owner{owner_kind="Deployment"})
+  )
+)'''
 unit = "count"
 
 [[widgets]]
 type = "stat"
 title = "Unhealthy"
-area = { column = 5, row = 0 }
-query = 'sum(kube_pod_status_phase{phase=~"Pending|Failed|Unknown"})'
+area = { column = 4, row = 1 }
+query = '''
+sum(
+  max by (namespace, pod) (
+    (kube_pod_status_phase{phase=~"Pending|Running|Unknown",
+      namespace!~"kube-system|longhorn-system|metallb-system|traefik|argocd|monitor"} == 1)
+    * on (namespace, pod) group_left (replicaset) label_replace(kube_pod_owner{owner_kind="ReplicaSet"}, "replicaset", "$1", "owner_name", "(.*)")
+    * on (namespace, replicaset) group_left max by (namespace, replicaset) (kube_replicaset_owner{owner_kind="Deployment"})
+  )
+  * on (namespace, pod) max by (namespace, pod) (kube_pod_status_ready{condition!="true"})
+) or vector(0)'''
 unit = "count"
 thresholds = [{ value = 0, level = "ok" }, { value = 1, level = "warning" }, { value = 5, level = "critical" }]
 
 [[widgets]]
 type = "stat"
+title = "Targets down"
+area = { column = 5, row = 0 }
+query = 'count(up == 0) or vector(0)'
+total_query = 'count(up)'
+unit = "count"
+thresholds = [{ value = 0, level = "ok" }, { value = 1, level = "warning" }, { value = 3, level = "critical" }]
+
+[[widgets]]
+type = "stat"
 title = "Containers"
-area = { column = 6, row = 0 }
+area = { column = 1, row = 1 }
 query = 'count(container_last_seen{job="cadvisor-hosts", name!=""})'
 unit = "count"
 
-# --- Right: trends and alerts ---------------------------------------------
+# OOM kills of every cadvisor (docker hosts and Kubernetes) and Kubernetes
+# container restarts. Daily counters move slowly, so they refresh less often.
+[[widgets]]
+type = "stat"
+title = "OOM 24h"
+area = { column = 2, row = 1 }
+refresh = "5m"
+query = 'round(sum(increase(container_oom_events_total[24h]))) or vector(0)'
+unit = "count"
+thresholds = [{ value = 0, level = "ok" }, { value = 1, level = "warning" }, { value = 5, level = "critical" }]
 
 [[widgets]]
-type = "timeseries"
-title = "CPU (1h)"
-area = { column = 1, row = 1, column_span = 3, row_span = 2 }
-style = "sparklines"
-range = "1h"
-points = 60
-minimum = 0
-maximum = 1
-unit = "ratio"
-decimals = 0
-
-[[widgets.queries]]
-query = 'label_replace(max by (id) (pve_cpu_usage_ratio{id=~"node/.*"}), "node", "$1", "id", "node/(.*)")'
-legend = "{{node}}"
-
-[[widgets.queries]]
-query = 'label_replace(1 - avg by (instance) (rate(node_cpu_seconds_total{group="docker", mode="idle"}[5m])), "host", "$1", "instance", "([^.]+)\\..*")'
-legend = "{{host}}"
+type = "stat"
+title = "Restarts 24h"
+area = { column = 3, row = 1 }
+refresh = "5m"
+query = 'round(sum(increase(kube_pod_container_status_restarts_total[24h]))) or vector(0)'
+unit = "count"
+thresholds = [{ value = 0, level = "ok" }, { value = 5, level = "warning" }, { value = 20, level = "critical" }]
 
 [[widgets]]
-type = "timeseries"
-title = "CPU temperature (6h)"
-area = { column = 4, row = 1, column_span = 3, row_span = 2 }
-style = "sparklines"
-range = "6h"
-points = 60
-unit = "celsius"
-decimals = 0
+type = "stat"
+title = "Failed units"
+area = { column = 5, row = 1 }
+refresh = "1m"
+query = 'count(node_systemd_unit_state{state="failed"} == 1) or vector(0)'
+unit = "count"
+thresholds = [{ value = 0, level = "ok" }, { value = 1, level = "warning" }, { value = 3, level = "critical" }]
 
-[[widgets.queries]]
-query = 'label_replace(max by (nodename) (node_hwmon_temp_celsius{group=~"proxmox|docker"} * on (instance, chip) group_left node_hwmon_chip_names{chip_name=~"coretemp|k10temp"} * on (instance) group_left (nodename) node_uname_info{group=~"proxmox|docker"}), "host", "$1", "nodename", "(.*)")'
-legend = "{{host}}"
+# --- Right: alerts ------------------------------------------------------
 
 [[widgets]]
 type = "alerts"
 title = "Firing alerts"
-area = { column = 1, row = 3, column_span = 6 }
+area = { column = 1, row = 2, column_span = 5, row_span = 3 }
 states = ["Alerting"]
 severity_label = "severity"
 default_level = "warning"

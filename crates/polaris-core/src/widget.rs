@@ -20,6 +20,11 @@ const MISSING_VALUE_TEXT: &str = "-";
 pub struct Widget {
     pub title: String,
     pub area: Area,
+    /// Minimum time between two fetches of this widget (`refresh = "5m"`).
+    /// Defaults to the global `refresh.interval`; slow moving widgets such
+    /// as long range charts can refresh less often.
+    #[serde(default, with = "humantime_serde")]
+    pub refresh: Option<Duration>,
     #[serde(flatten)]
     pub kind: WidgetKind,
 }
